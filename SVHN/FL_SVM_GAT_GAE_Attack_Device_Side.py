@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import copy
-import time
+import math, time
 from sklearn.metrics import accuracy_score
 #import networkx as nx
 import matplotlib.pyplot as plt
@@ -83,11 +83,44 @@ class Federated_SVM:
         q = np.clip(q, epsilon, 1)  # Clip to avoid zeros
         return np.sum(np.where(p != 0, p * np.log(p / q), 0))
 
+    def angle_between_vectors(self, a, b):
+        a = np.array(a)
+        b = np.array(b)
+        dot_product = np.dot(a, b)
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        cos_theta = dot_product / (norm_a * norm_b)
+        angle_radians = np.arccos(np.clip(cos_theta, -1.0, 1.0))  # Clipping for numerical stability
+        # Convert the angle to degrees if needed (optional)
+        angle_degrees = np.degrees(angle_radians)
+        return angle_radians, angle_degrees
+
+    def jains_fairness_index(self, allocations):
+        """
+        Calculate Jain's Fairness Index for a list of allocations.
+        Parameters:
+        allocations (list or np.array): A list or array of resource allocations (positive numbers).
+
+        Returns:
+        float: Jain's fairness index, ranging from 0 to 1.
+        """
+        allocations = np.array(allocations)
+        # Calculate the numerator: (sum of allocations)^2
+        numerator = np.sum(allocations) ** 2
+        # Calculate the denominator: n * (sum of squared allocations)
+        denominator = len(allocations) * np.sum(allocations ** 2)
+        # Compute Jain's fairness index
+        fairness_index = numerator / denominator if denominator != 0 else 0
+        return fairness_index
+
+
     def fit(self, g_iters,  aggregator, num_malicious):
         w_best = np.zeros(self.X_test.shape[1])
         b_best = 0
         w_surrogate_list = []
         KL_div, cosine_distance = [], []
+        mould_len_set, angle_set = [], []
+        length_jains_set, angle_jains_set = [], []
 
         for i in range(0, g_iters):
             print('global round', i + 1)
@@ -156,12 +189,28 @@ class Federated_SVM:
                 w_agg,  b_agg = aggregator(w_all, b_list, num_malicious)
 
                 tem_kl_div, tem_cos = [], []
+                lengths, angles = [], []
                 for idx in range(w_all.shape[0]):
                     tem_kl_div.append(self.kl_divergence(w_all[idx, :], w_agg))
                     tem_cos.append(cosine(w_all[idx, :], w_agg))
+
+                    length = math.sqrt(sum(x ** 2 for x in w_all[idx, :]))
+                    lengths.append(length)
+                mould_len_set.append(lengths)
+                length_jains_idx = self.jains_fairness_index(lengths)
+                length_jains_set.append(length_jains_idx)
+
                 KL_div.append(tem_kl_div)
                 cosine_distance.append(tem_cos)
-                    #if self.accuracy(w_agg) > self.accuracy(w_best) or i == 0:
+
+                for k in range(1, w_all.shape[0]):
+                    angle_radians, angle_degrees = self.angle_between_vectors(w_all[0, :], w_all[k, :])
+                    angles.append(angle_degrees)
+                angle_set.append(angles)
+                angle_jains_idx = self.jains_fairness_index(angles)
+                angle_jains_set.append(angle_jains_idx)
+
+                #if self.accuracy(w_agg) > self.accuracy(w_best) or i == 0:
             #if i == 0:
             #if i == 0:
             #    w_best = copy.deepcopy(w_agg)
@@ -174,7 +223,7 @@ class Federated_SVM:
             self.timefit.append(time.time())
             print('global test acc', self.accuracy(w_agg, b_agg))
             self.global_accuracy.append(self.accuracy(w_agg, b_agg))
-        return self.Loss, self.global_accuracy, self.local_clients_accuracy, KL_div, cosine_distance
+        return self.Loss, self.global_accuracy, self.local_clients_accuracy, KL_div, cosine_distance, length_jains_set, angle_jains_set
 
 
 
@@ -213,10 +262,11 @@ if __name__ == '__main__':
         global train set for the SVM model and a global test set 
         containing the data from all the clusters"""
         # n_clients = n_clusters # number of clients
-        num_clients_index = [5, 10, 15, 20, 25, 30]
+        #num_clients_index = [5, 10, 15, 20, 25, 30]
+        num_clients_index = [20]
         #num_clients_index = [5]
         #num_malicious_clients_index = [1]
-        num_malicious_clients_index = [1,2,3,4,5]
+        num_malicious_clients_index = [5]
         for n_clients in num_clients_index:
             clients_X, clients_y, X_test, y_test = get_clients(data[0][0], data[1][0], n_clients)
             xtrain_gl, ytrain_gl = get_total_from_clients(clients_X, clients_y)
@@ -227,14 +277,14 @@ if __name__ == '__main__':
             num_iters_index=[2,8,4,5]
             n_iters = num_iters_index[1] # number of local iterations
 
-            num_global_commu_round_index = [100, 200, 300]
+            num_global_commu_round_index = [110, 200, 300]
             n_global_commu_round = num_global_commu_round_index[0] # number of global communicaton round
 
 
             for m_clients in num_malicious_clients_index:
                 f_svm = Federated_SVM(xtrain_gl, ytrain_gl, n_clients, n_iters, val=False,  opt='batch_GD')
                 f_svm.create_clients(clients_X, clients_y, X_test, y_test)
-                Loss, global_accuracy,local_clients_accuracy, KL_div, cosine_distance = f_svm.fit(n_global_commu_round, f_svm.average_aggregator, m_clients)
+                Loss, global_accuracy,local_clients_accuracy, KL_div, cosine_distance, length_jains_set, angle_jains_set = f_svm.fit(n_global_commu_round, f_svm.average_aggregator, m_clients)
                 KL_div = np.array(KL_div)
                 cosine_distance = np.array(cosine_distance)
                 #print(KL_div)
@@ -243,7 +293,7 @@ if __name__ == '__main__':
                                                                          m_clients),
                         {"Global_model_loss": Loss, "Global_model_accuracy": global_accuracy,
                          "Local_model_accuracy": local_clients_accuracy, "KL_divergence": KL_div,
-                         "cosine_distance": cosine_distance})
+                         "cosine_distance": cosine_distance, "length_jains_set": length_jains_set, "angle_jains_set": angle_jains_set})
 
 
                 # plot loss curve
@@ -305,6 +355,23 @@ if __name__ == '__main__':
                 # #plt.title('Communication rounds ={}, local iterations = {}'.format(n_global_commu_round, n_iters))  # show legend
                 plt.savefig('./local_devices_KL_{}_{}_{}_{}_{}.png'.format(x, n_clients, n_global_commu_round, n_iters,
                                                                          m_clients))
+                plt.figure()
+                plt.plot(range(len(length_jains_set)), length_jains_set)
+                plt.legend()
+                plt.xlabel('Communication rounds')
+                plt.ylabel('Jains Fairness Index of Length')
+                plt.savefig(
+                    './jains_lengths_{}_{}_{}_{}_{}.png'.format(x, n_clients, n_global_commu_round, n_iters,
+                                                                m_clients))
 
-                #plt.show()
+                plt.figure()
+                plt.plot(range(len(angle_jains_set)), angle_jains_set)
+                plt.legend()
+                plt.xlabel('Communication rounds')
+                plt.ylabel('Jains Fairness Index of Angle')
+                plt.savefig(
+                    './jains_angles_{}_{}_{}_{}_{}.png'.format(x, n_clients, n_global_commu_round, n_iters,
+                                                               m_clients))
+
+                plt.show()
                 #plt.close()
